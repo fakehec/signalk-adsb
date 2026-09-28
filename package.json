@@ -30,7 +30,7 @@
     "eslint-plugin-import": "^2.32.0"
   },
   "signalk": {
-    "appIcon": "./doc/appicon.png",
+    "appIcon": "./doc/appicon-256.png",
     "displayName": "ADS-B Flight Tracking",
     "screenshots": [
       "./doc/freeboard.png"
