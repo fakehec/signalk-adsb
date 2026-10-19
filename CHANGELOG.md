@@ -1,5 +1,13 @@
 # Changelog
 
+## [Unreleased]
+### Added
+- Optional internet data source: fetch aircraft around the vessel from [adsb.lol](https://adsb.lol), for boats without an ADS-B receiver
+
+### Fixed
+- An aircraft without a flight number no longer makes the whole update fail
+- Aircraft without a position fix are skipped instead of being published without coordinates
+
 ## [1.0.2] - 2026-06-16
 ### Added
 - Added app icon
