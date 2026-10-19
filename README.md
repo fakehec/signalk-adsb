@@ -1,7 +1,7 @@
 Receive aircraft via ADS-B into Signal K
 ========================================
 
-This plugin reads ADS-B aircraft data into Signal K, either from a local receiver running the [dump1090 software](https://github.com/antirez/dump1090), or from the free [adsb.lol](https://adsb.lol) network over the internet.
+This plugin reads ADS-B aircraft data into Signal K, either from a local receiver running the [dump1090 software](https://github.com/antirez/dump1090), or over the internet from the free [adsb.fi](https://adsb.fi) and [adsb.lol](https://adsb.lol) networks.
 
 ## Getting started
 
@@ -13,13 +13,21 @@ This plugin reads ADS-B aircraft data into Signal K, either from a local receive
   - If dump1090 is running on a different computer than Signal K, configure the IP address used in the plugin accordingly
 * (optional) Enable display of aircraft in Freeboard
 
-### Without a receiver, from adsb.lol
+### Without a receiver, over the internet
 
-* Install and enable this plugin, and set the data source to "Internet (adsb.lol)"
-* Set the radius around the vessel to fetch aircraft for (up to 250 nautical miles)
-* (optional) Enable display of aircraft in Freeboard
+* Install and enable this plugin, and set the data source to "Internet: adsb.fi" or "Internet: adsb.lol"
+* Choose the radius around the vessel to fetch aircraft for, and how often to refresh (30 seconds by default)
+* (optional) Enable display of aircraft in Freeboard. It shows the aircraft that fit on screen, so a large radius lets you zoom out and still see traffic.
 
-The plugin asks adsb.lol for the aircraft around the vessel's own position (`navigation.position`), so it needs a position fix and internet access. Data from adsb.lol is [ODbL](https://opendatacommons.org/licenses/odbl/summary/) licensed and comes from its community of feeders, so coverage depends on the area. Please keep the polling interval reasonable (the default 10 seconds is fine).
+The plugin asks for the aircraft around the vessel's own position (`navigation.position`), so it needs a position fix and internet access. Both networks are fed by volunteers' receivers, so coverage depends on the area. They carry nearly the same aircraft, so only one is used at a time. With "use the other service while the selected one fails" enabled (the default), the other one stands in while the selected one returns errors. A service that fails or answers HTTP 429 is left alone for a while (honouring `Retry-After`), starting at a minute and doubling up to 15 minutes.
+
+| | adsb.fi | adsb.lol |
+| --- | --- | --- |
+| Radius | up to 250 NM | up to 500 NM |
+| Request rate | about 1 per second | 500 per day, so the plugin asks it at most every 173 seconds |
+| Terms | personal, non-commercial use, with attribution | [ODbL](https://opendatacommons.org/licenses/odbl/summary/) licensed data |
+
+A request covering 500 NM returns several hundred aircraft (around 80 kB compressed), which is worth keeping in mind on metered connections.
 
 ![Aircraft approaching SKCG as seen on Freeboard](https://github.com/meri-imperiumi/signalk-adsb/raw/main/doc/freeboard.png)
 

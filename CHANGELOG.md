@@ -2,7 +2,9 @@
 
 ## [Unreleased]
 ### Added
-- Optional internet data source: fetch aircraft around the vessel from [adsb.lol](https://adsb.lol), for boats without an ADS-B receiver
+- Optional internet data sources for boats without an ADS-B receiver: fetch the aircraft around the vessel from [adsb.fi](https://adsb.fi) or [adsb.lol](https://adsb.lol)
+- Radius choice (25 to 500 NM) and a separate internet refresh interval (30 seconds by default)
+- Falls back to the other internet service while the selected one fails, and backs off after errors or HTTP 429
 
 ### Fixed
 - An aircraft without a flight number no longer makes the whole update fail

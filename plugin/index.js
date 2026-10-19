@@ -1,9 +1,29 @@
 const { version, homepage } = require('../package.json');
 
-const ADSB_LOL_URL = 'https://api.adsb.lol/v2/point';
-// adsb.lol rejects generic user agents and asks for contact info
+// Both services reject generic user agents and ask for contact info
 const USER_AGENT = `signalk-adsb/${version} (+${homepage})`;
-const ADSB_LOL_MAX_RADIUS = 250; // nautical miles, API limit
+
+// Free ADS-B networks with the readsb JSON format. Both are fed by the same
+// community receivers, so their data is nearly identical: one is used at a
+// time, and the other only stands in while the first one is failing.
+const SERVICES = {
+  'adsb.fi': {
+    url: (lat, lon, radius) => `https://opendata.adsb.fi/api/v2/lat/${lat}/lon/${lon}/dist/${radius}`,
+    list: (data) => data.aircraft,
+    maxRadius: 250, // nautical miles, larger values answer HTTP 400
+    minSpacing: 1000, // about 1 request per second
+  },
+  'adsb.lol': {
+    url: (lat, lon, radius) => `https://api.adsb.lol/v2/point/${lat}/${lon}/${radius}`,
+    list: (data) => data.ac,
+    maxRadius: 500,
+    // Its RateLimit headers allow 500 requests a day
+    minSpacing: Math.ceil(86400000 / 500),
+  },
+};
+const RADIUS_OPTIONS = [25, 50, 100, 200, 250, 500];
+const MIN_BACKOFF = 60 * 1000;
+const MAX_BACKOFF = 15 * 60 * 1000;
 
 function cleanFlight(flight) {
   return typeof flight === 'string' ? flight.replace(/\s/g, '') : '';
@@ -27,8 +47,8 @@ function fromDump1090(adsb) {
   };
 }
 
-// adsb.lol v2 (readsb format): alt_baro is ft or the string "ground", gs in kt
-function fromAdsbLol(ac) {
+// readsb format: alt_baro is ft or the string "ground", gs in kt
+function fromReadsb(ac) {
   let altitude = toNumber(ac.alt_baro);
   if (ac.alt_baro === 'ground') {
     altitude = 0;
@@ -98,18 +118,38 @@ function toValues(aircraft) {
   return values;
 }
 
+class HttpError extends Error {
+  constructor(status, retryAfter) {
+    super(`Request failed with HTTP ${status}`);
+    this.status = status;
+    this.retryAfter = retryAfter;
+  }
+}
+
 module.exports = (app) => {
   const plugin = {};
   plugin.id = 'signalk-adsb';
   plugin.name = 'ADS-B';
   plugin.description = 'Receive aircraft via ADS-B into Signal K';
   let interval;
+  // Per internet service: when it was last asked, and until when to leave it alone
+  let state = {};
+
+  function serviceState(name) {
+    if (!state[name]) {
+      state[name] = { lastRequest: 0, backoffUntil: 0, failures: 0 };
+    }
+    return state[name];
+  }
 
   function fetchJson(url, options) {
     return fetch(url, options)
       .then((response) => {
         if (!response.ok) {
-          throw new Error(`Request failed with HTTP ${response.status}`);
+          const header = response.headers && response.headers.get
+            ? Number(response.headers.get('retry-after'))
+            : NaN;
+          throw new HttpError(response.status, Number.isFinite(header) ? header : undefined);
         }
         return response.json();
       });
@@ -126,30 +166,99 @@ module.exports = (app) => {
       }));
   }
 
-  function fetchAdsbLol(settings) {
+  function backOff(name, err) {
+    const s = serviceState(name);
+    s.failures += 1;
+    let delay = Math.min(MIN_BACKOFF * 2 ** (s.failures - 1), MAX_BACKOFF);
+    if (err.retryAfter !== undefined) {
+      delay = Math.max(delay, err.retryAfter * 1000);
+    }
+    s.backoffUntil = Date.now() + delay;
+  }
+
+  function requestService(name, settings, position) {
+    const service = SERVICES[name];
+    const s = serviceState(name);
+    s.lastRequest = Date.now();
+    const radius = Math.min(Math.max(Math.round(settings.radius || 50), 1), service.maxRadius);
+    const url = service.url(position.latitude.toFixed(3), position.longitude.toFixed(3), radius);
+    return fetchJson(url, { headers: { 'User-Agent': USER_AGENT } })
+      .then((data) => {
+        s.failures = 0;
+        s.backoffUntil = 0;
+        const list = data ? service.list(data) : undefined;
+        return {
+          aircraft: Array.isArray(list) ? list.map(fromReadsb) : [],
+          src: name,
+          via: `from ${name} within ${radius} NM`,
+        };
+      });
+  }
+
+  // Which service to ask now: the selected one unless it is backing off,
+  // else the other one when fallback is enabled. Each service is only asked
+  // as often as its own limits allow, so a slow one may skip a cycle.
+  function pickService(settings) {
+    const now = Date.now();
+    const primary = SERVICES[settings.source] ? settings.source : 'adsb.fi';
+    const candidates = [primary];
+    if (settings.fallback !== false) {
+      candidates.push(...Object.keys(SERVICES).filter((n) => n !== primary));
+    }
+    const available = candidates.filter((n) => serviceState(n).backoffUntil <= now);
+    if (!available.length) {
+      return { wait: 'all services are backing off after errors' };
+    }
+    const name = available[0];
+    if (now - serviceState(name).lastRequest < SERVICES[name].minSpacing) {
+      return { skip: true };
+    }
+    return { name, primary };
+  }
+
+  function fetchInternet(settings) {
     const own = app.getSelfPath('navigation.position');
     const position = own && own.value ? own.value : own;
     if (!position
       || toNumber(position.latitude) === undefined
       || toNumber(position.longitude) === undefined) {
+      return Promise.resolve({ status: 'Waiting for own vessel position' });
+    }
+    const pick = pickService(settings);
+    if (pick.skip) {
       return Promise.resolve(null);
     }
-    const radius = Math.min(Math.max(Math.round(settings.radius || 50), 1), ADSB_LOL_MAX_RADIUS);
-    const url = `${ADSB_LOL_URL}/${position.latitude.toFixed(3)}/${position.longitude.toFixed(3)}/${radius}`;
-    return fetchJson(url, { headers: { 'User-Agent': USER_AGENT } })
-      .then((data) => ({
-        aircraft: data && Array.isArray(data.ac) ? data.ac.map(fromAdsbLol) : [],
-        src: 'adsb.lol',
-        via: `from adsb.lol within ${radius} NM`,
-      }));
+    if (pick.wait) {
+      return Promise.resolve({ error: `Not fetching aircraft: ${pick.wait}` });
+    }
+    return requestService(pick.name, settings, position)
+      .then((result) => {
+        if (pick.name !== pick.primary) {
+          return { ...result, via: `${result.via} (${pick.primary} unavailable)` };
+        }
+        return result;
+      })
+      .catch((err) => {
+        backOff(pick.name, err);
+        throw err;
+      });
   }
 
   function poll(settings) {
-    const request = settings.source === 'adsb.lol' ? fetchAdsbLol(settings) : fetchDump1090(settings);
+    const request = settings.source === 'dump1090' || !settings.source
+      ? fetchDump1090(settings)
+      : fetchInternet(settings);
     return request
       .then((result) => {
         if (!result) {
-          app.setPluginStatus('Waiting for own vessel position');
+          return;
+        }
+        if (result.status) {
+          app.setPluginStatus(result.status);
+          return;
+        }
+        if (result.error) {
+          app.setPluginError(result.error);
           return;
         }
         app.debug(result);
@@ -184,8 +293,10 @@ module.exports = (app) => {
   }
 
   plugin.start = (settings) => {
-    const ms = settings.interval ? settings.interval * 1000 : 10000;
-    interval = setInterval(() => poll(settings), ms);
+    state = {};
+    const local = settings.source === 'dump1090' || !settings.source;
+    const seconds = local ? settings.interval || 10 : settings.internetInterval || 30;
+    interval = setInterval(() => poll(settings), seconds * 1000);
   };
 
   plugin.stop = () => {
@@ -203,11 +314,11 @@ module.exports = (app) => {
     properties: {
       source: {
         type: 'string',
-        enum: ['dump1090', 'adsb.lol'],
-        enumNames: ['Local receiver (dump1090)', 'Internet (adsb.lol)'],
+        enum: ['dump1090', 'adsb.fi', 'adsb.lol'],
+        enumNames: ['Local receiver (dump1090)', 'Internet: adsb.fi', 'Internet: adsb.lol'],
         default: 'dump1090',
         title: 'Aircraft data source',
-        description: 'Read a local ADS-B receiver, or fetch aircraft around the vessel from the free adsb.lol service (needs internet access)',
+        description: 'Read a local ADS-B receiver, or fetch the aircraft around the vessel from a free ADS-B network (needs internet access and a position fix)',
       },
       host: {
         type: 'string',
@@ -221,19 +332,31 @@ module.exports = (app) => {
         title: 'dump1090 port',
         description: 'Port used for dump1090',
       },
-      radius: {
-        type: 'integer',
-        default: 50,
-        minimum: 1,
-        maximum: ADSB_LOL_MAX_RADIUS,
-        title: 'adsb.lol radius (in nautical miles)',
-        description: 'Fetch aircraft within this distance of the vessel position (adsb.lol only, max 250)',
-      },
       interval: {
         type: 'integer',
         default: 10,
-        title: 'Polling interval (in seconds)',
-        description: 'How often to fetch the aircraft data',
+        title: 'dump1090 polling interval (in seconds)',
+        description: 'How often to fetch the data from dump1090',
+      },
+      radius: {
+        type: 'integer',
+        enum: RADIUS_OPTIONS,
+        default: 50,
+        title: 'Internet: radius around the vessel (in nautical miles)',
+        description: 'adsb.fi serves up to 250 NM, so 500 NM only applies to adsb.lol. Chart plotters show the aircraft that fit on screen.',
+      },
+      internetInterval: {
+        type: 'integer',
+        default: 30,
+        minimum: 5,
+        title: 'Internet: refresh interval (in seconds)',
+        description: 'How often to fetch the aircraft from the internet. adsb.lol allows 500 requests a day, so it is never asked more often than every 173 seconds.',
+      },
+      fallback: {
+        type: 'boolean',
+        default: true,
+        title: 'Internet: use the other service while the selected one fails',
+        description: 'Both services carry nearly the same aircraft, so the other one can stand in for a while',
       },
     },
   };
