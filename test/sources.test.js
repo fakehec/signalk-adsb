@@ -209,6 +209,48 @@ describe('aircraft sources', () => {
     assert.equal(requests.length, 2);
   });
 
+  it('reads aircraft.json from dump1090-fa or readsb', async () => {
+    mockFetch(() => ({
+      body: {
+        now: 1792422166.3,
+        aircraft: [
+          {
+            hex: '342189', flight: 'IBE3456 ', lat: 37.9, lon: -3.6, alt_baro: 24625, gs: 422.6, track: 30, seen_pos: 2.3,
+          },
+          // Heard, but no position yet
+          { hex: '3c4b26', alt_baro: 36000 },
+        ],
+      },
+    }));
+    const app = makeApp();
+    await pluginFactory(app).poll({
+      source: 'readsb', host: '10.0.0.7', port: 8080, aircraftJsonPath: 'skyaware/data/aircraft.json',
+    });
+    assert.deepEqual(requests.map((r) => r.url), ['http://10.0.0.7:8080/skyaware/data/aircraft.json']);
+    assert.equal(app.messages.length, 1);
+    assert.equal(app.messages[0].updates[0].source.src, '10.0.0.7:8080');
+    assert.equal(app.status, 'Receiving 1 aircraft via ADS-B');
+  });
+
+  it('stamps each aircraft with the time of its position fix', async () => {
+    mockFetch((url) => (url.includes('aircraft.json')
+      ? {
+        body: {
+          now: 1792422166.3,
+          aircraft: [{
+            hex: 'aaaaaa', lat: 38, lon: -3, seen_pos: 40,
+          }],
+        },
+      }
+      : { body: { now: 1792422166300, ac: [{ hex: 'bbbbbb', lat: 38, lon: 1 }] } }));
+    const app = makeApp(OWN);
+    await pluginFactory(app).poll({ source: 'readsb' });
+    await pluginFactory(app).poll({ source: 'adsb.lol' });
+    assert.equal(app.messages[0].updates[0].timestamp, new Date(1792422126300).toISOString());
+    // No seen_pos: the response time
+    assert.equal(app.messages[1].updates[0].timestamp, new Date(1792422166300).toISOString());
+  });
+
   it('waits for the vessel position before using the internet', async () => {
     mockFetch(() => ({ body: { aircraft: [] } }));
     const app = makeApp(undefined);

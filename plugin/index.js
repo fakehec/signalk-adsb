@@ -47,8 +47,18 @@ function fromDump1090(adsb) {
   };
 }
 
-// readsb format: alt_baro is ft or the string "ground", gs in kt
-function fromReadsb(ac) {
+// readsb `now` is in seconds (dump1090-fa, readsb, adsb.fi) or milliseconds (adsb.lol)
+function nowMillis(now) {
+  const n = toNumber(now);
+  if (n === undefined) {
+    return Date.now();
+  }
+  return n > 1e11 ? n : n * 1000;
+}
+
+// readsb format (dump1090-fa, readsb, adsb.fi, adsb.lol): alt_baro is ft or
+// the string "ground", gs in kt, seen_pos = seconds since the position fix
+function fromReadsb(ac, now) {
   let altitude = toNumber(ac.alt_baro);
   if (ac.alt_baro === 'ground') {
     altitude = 0;
@@ -64,6 +74,7 @@ function fromReadsb(ac) {
     speed: toNumber(ac.gs),
     track: toNumber(ac.track),
     squawk: ac.squawk,
+    time: toNumber(ac.seen_pos) !== undefined ? now - ac.seen_pos * 1000 : now,
   };
 }
 
@@ -166,6 +177,25 @@ module.exports = (app) => {
       }));
   }
 
+  // dump1090-fa and readsb write aircraft.json in the same format as the
+  // internet services, with the position age in each record
+  function fetchReadsbLocal(settings) {
+    const host = settings.host || '127.0.0.1';
+    const port = settings.port || 8080;
+    const path = settings.aircraftJsonPath || '/data/aircraft.json';
+    return fetchJson(`http://${host}:${port}${path.startsWith('/') ? '' : '/'}${path}`)
+      .then((data) => {
+        const now = nowMillis(data && data.now);
+        return {
+          aircraft: data && Array.isArray(data.aircraft)
+            ? data.aircraft.map((ac) => fromReadsb(ac, now))
+            : [],
+          src: `${host}:${port}`,
+          via: 'via ADS-B',
+        };
+      });
+  }
+
   function backOff(name, err) {
     const s = serviceState(name);
     s.failures += 1;
@@ -187,8 +217,9 @@ module.exports = (app) => {
         s.failures = 0;
         s.backoffUntil = 0;
         const list = data ? service.list(data) : undefined;
+        const now = nowMillis(data && data.now);
         return {
-          aircraft: Array.isArray(list) ? list.map(fromReadsb) : [],
+          aircraft: Array.isArray(list) ? list.map((ac) => fromReadsb(ac, now)) : [],
           src: name,
           via: `from ${name} within ${radius} NM`,
         };
@@ -244,10 +275,19 @@ module.exports = (app) => {
       });
   }
 
+  function isLocal(settings) {
+    return !settings.source || settings.source === 'dump1090' || settings.source === 'readsb';
+  }
+
   function poll(settings) {
-    const request = settings.source === 'dump1090' || !settings.source
-      ? fetchDump1090(settings)
-      : fetchInternet(settings);
+    let request;
+    if (settings.source === 'readsb') {
+      request = fetchReadsbLocal(settings);
+    } else if (isLocal(settings)) {
+      request = fetchDump1090(settings);
+    } else {
+      request = fetchInternet(settings);
+    }
     return request
       .then((result) => {
         if (!result) {
@@ -278,7 +318,7 @@ module.exports = (app) => {
                   label: 'signalk-adsb',
                   src: result.src,
                 },
-                timestamp: new Date().toISOString(),
+                timestamp: new Date(a.time || Date.now()).toISOString(),
                 values: toValues(a),
               },
             ],
@@ -294,8 +334,7 @@ module.exports = (app) => {
 
   plugin.start = (settings) => {
     state = {};
-    const local = settings.source === 'dump1090' || !settings.source;
-    const seconds = local ? settings.interval || 10 : settings.internetInterval || 30;
+    const seconds = isLocal(settings) ? settings.interval || 10 : settings.internetInterval || 30;
     interval = setInterval(() => poll(settings), seconds * 1000);
   };
 
@@ -314,8 +353,13 @@ module.exports = (app) => {
     properties: {
       source: {
         type: 'string',
-        enum: ['dump1090', 'adsb.fi', 'adsb.lol'],
-        enumNames: ['Local receiver (dump1090)', 'Internet: adsb.fi', 'Internet: adsb.lol'],
+        enum: ['dump1090', 'readsb', 'adsb.fi', 'adsb.lol'],
+        enumNames: [
+          'Local receiver: dump1090 (data.json)',
+          'Local receiver: dump1090-fa or readsb (aircraft.json)',
+          'Internet: adsb.fi',
+          'Internet: adsb.lol',
+        ],
         default: 'dump1090',
         title: 'Aircraft data source',
         description: 'Read a local ADS-B receiver, or fetch the aircraft around the vessel from a free ADS-B network (needs internet access and a position fix)',
@@ -323,20 +367,26 @@ module.exports = (app) => {
       host: {
         type: 'string',
         default: '127.0.0.1',
-        title: 'dump1090 host',
-        description: 'Address of the computer running dump1090',
+        title: 'Local receiver host',
+        description: 'Address of the computer running dump1090, dump1090-fa or readsb',
       },
       port: {
         type: 'integer',
         default: 8080,
-        title: 'dump1090 port',
-        description: 'Port used for dump1090',
+        title: 'Local receiver port',
+        description: 'HTTP port of the receiver software',
+      },
+      aircraftJsonPath: {
+        type: 'string',
+        default: '/data/aircraft.json',
+        title: 'Local receiver: aircraft.json path (dump1090-fa, readsb)',
+        description: 'Usually /data/aircraft.json, /skyaware/data/aircraft.json (PiAware) or /tar1090/data/aircraft.json',
       },
       interval: {
         type: 'integer',
         default: 10,
-        title: 'dump1090 polling interval (in seconds)',
-        description: 'How often to fetch the data from dump1090',
+        title: 'Local receiver polling interval (in seconds)',
+        description: 'How often to fetch the data from the receiver',
       },
       radius: {
         type: 'integer',

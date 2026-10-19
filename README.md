@@ -1,16 +1,18 @@
 Receive aircraft via ADS-B into Signal K
 ========================================
 
-This plugin reads ADS-B aircraft data into Signal K, either from a local receiver running the [dump1090 software](https://github.com/antirez/dump1090), or over the internet from the free [adsb.fi](https://adsb.fi) and [adsb.lol](https://adsb.lol) networks.
+This plugin reads ADS-B aircraft data into Signal K, either from a local receiver running [dump1090](https://github.com/antirez/dump1090), [dump1090-fa](https://github.com/flightaware/dump1090) (PiAware) or [readsb](https://github.com/wiedehopf/readsb), or over the internet from the free [adsb.fi](https://adsb.fi) and [adsb.lol](https://adsb.lol) networks.
 
 ## Getting started
 
 ### With a local receiver
 
 * Get an [RTL-SDR stick](https://www.rtl-sdr.com/about-rtl-sdr/) with [antenna suitable for 1090MHz](https://lucsmall.com/2017/02/06/making-antennas-for-1090mhz-ads-b-aircraft-tracking/) and plug it into a computer
-* Install and run dump1090 with the `-net` option
-* Install and enable this plugin
-  - If dump1090 is running on a different computer than Signal K, configure the IP address used in the plugin accordingly
+* Install and run dump1090 with the `-net` option, or dump1090-fa / readsb (as installed by PiAware, the Flightradar24 feeder or adsb.im)
+* Install and enable this plugin, and pick the matching data source
+  - "dump1090 (data.json)" for the original dump1090
+  - "dump1090-fa or readsb (aircraft.json)" for the others; set the path to `aircraft.json` if it isn't the default `/data/aircraft.json` (PiAware also serves it as `/skyaware/data/aircraft.json`, tar1090 as `/tar1090/data/aircraft.json`)
+  - If the receiver software runs on a different computer than Signal K, configure its IP address and port accordingly
 * (optional) Enable display of aircraft in Freeboard
 
 ### Without a receiver, over the internet
@@ -26,6 +28,8 @@ The plugin asks for the aircraft around the vessel's own position (`navigation.p
 | Radius | up to 250 NM | up to 500 NM |
 | Request rate | about 1 per second | 500 per day, so the plugin asks it at most every 173 seconds |
 | Terms | personal, non-commercial use, with attribution | [ODbL](https://opendatacommons.org/licenses/odbl/summary/) licensed data |
+
+With aircraft.json and the internet sources, each aircraft is stamped with the time of its last position fix (`seen_pos`), so chart plotters can grey out targets that are no longer heard.
 
 A request covering 500 NM returns several hundred aircraft (around 80 kB compressed), which is worth keeping in mind on metered connections.
 
