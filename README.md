@@ -13,6 +13,7 @@ This plugin reads ADS-B aircraft data into Signal K, either from a local receive
   - "dump1090 (data.json)" for the original dump1090
   - "dump1090-fa or readsb (aircraft.json)" for the others; set the path to `aircraft.json` if it isn't the default `/data/aircraft.json` (PiAware also serves it as `/skyaware/data/aircraft.json`, tar1090 as `/tar1090/data/aircraft.json`)
   - If the receiver software runs on a different computer than Signal K, configure its IP address and port accordingly
+  - (optional) Enable "also fetch aircraft from the internet" to add the aircraft beyond the receiver's range from adsb.fi or adsb.lol. While the receiver hears an aircraft, its own fresher position is used and the internet copy is skipped; an aircraft it has not heard for a minute is taken from the internet.
 * (optional) Enable display of aircraft in Freeboard
 
 ### Without a receiver, over the internet

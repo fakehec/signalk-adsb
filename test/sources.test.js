@@ -251,6 +251,62 @@ describe('aircraft sources', () => {
     assert.equal(app.messages[1].updates[0].timestamp, new Date(1792422166300).toISOString());
   });
 
+  it('adds internet aircraft to a local receiver, keeping the receiver\'s positions', async () => {
+    mockFetch((url) => (url.includes('aircraft.json')
+      ? {
+        body: {
+          now: 1792422166.3,
+          aircraft: [{
+            hex: 'aaaaaa', lat: 38, lon: -3, seen_pos: 1,
+          }],
+        },
+      }
+      : {
+        body: {
+          now: 1792422166.3,
+          aircraft: [
+            { hex: 'aaaaaa', lat: 38.1, lon: -3.1 },
+            { hex: 'bbbbbb', lat: 39, lon: -2 },
+          ],
+        },
+      }));
+    const app = makeApp(OWN);
+    const plugin = pluginFactory(app);
+    const settings = { source: 'readsb', internetSupplement: true, internetService: 'adsb.fi' };
+
+    await plugin.poll(settings, 'local');
+    await plugin.poll(settings, 'internet');
+    assert.deepEqual(app.messages.map((m) => [m.context, m.updates[0].source.src]), [
+      ['aircraft.urn:mrn:icao:hex:aaaaaa', '127.0.0.1:8080'],
+      ['aircraft.urn:mrn:icao:hex:bbbbbb', 'adsb.fi'],
+    ]);
+    assert.equal(app.status, 'Receiving 1 aircraft via ADS-B · Receiving 1 aircraft from adsb.fi within 50 NM');
+
+    // Once the receiver has not heard it for a minute, the internet copy is used
+    clock += 61 * 1000;
+    await plugin.poll(settings, 'internet');
+    assert.deepEqual(app.messages.slice(2).map((m) => m.context), [
+      'aircraft.urn:mrn:icao:hex:aaaaaa',
+      'aircraft.urn:mrn:icao:hex:bbbbbb',
+    ]);
+  });
+
+  it('reports an internet failure without flagging the local receiver as failed', async () => {
+    mockFetch((url) => (url.includes('aircraft.json')
+      ? { body: { now: 1792422166.3, aircraft: [{ hex: 'aaaaaa', lat: 38, lon: -3 }] } }
+      : { status: 503 }));
+    const app = makeApp(OWN);
+    const plugin = pluginFactory(app);
+    const settings = {
+      source: 'readsb', internetSupplement: true, internetService: 'adsb.fi', fallback: false,
+    };
+
+    await plugin.poll(settings, 'local');
+    await plugin.poll(settings, 'internet');
+    assert.equal(app.pluginError, null);
+    assert.equal(app.status, 'Receiving 1 aircraft via ADS-B · Request failed with HTTP 503');
+  });
+
   it('waits for the vessel position before using the internet', async () => {
     mockFetch(() => ({ body: { aircraft: [] } }));
     const app = makeApp(undefined);

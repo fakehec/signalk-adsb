@@ -22,6 +22,9 @@ const SERVICES = {
   },
 };
 const RADIUS_OPTIONS = [25, 50, 100, 200, 250, 500];
+// While the local receiver heard an aircraft this recently, its (fresher)
+// position wins and the internet copy of that aircraft is not published.
+const LOCAL_PRIORITY = 60 * 1000;
 const MIN_BACKOFF = 60 * 1000;
 const MAX_BACKOFF = 15 * 60 * 1000;
 
@@ -142,9 +145,13 @@ module.exports = (app) => {
   plugin.id = 'signalk-adsb';
   plugin.name = 'ADS-B';
   plugin.description = 'Receive aircraft via ADS-B into Signal K';
-  let interval;
+  let intervals = [];
   // Per internet service: when it was last asked, and until when to leave it alone
   let state = {};
+  // Local receiver: when each aircraft (hex) was last heard
+  let heardLocally = new Map();
+  // Last status line of each poller ('local', 'internet'), shown together
+  let statusParts = {};
 
   function serviceState(name) {
     if (!state[name]) {
@@ -231,7 +238,7 @@ module.exports = (app) => {
   // as often as its own limits allow, so a slow one may skip a cycle.
   function pickService(settings) {
     const now = Date.now();
-    const primary = SERVICES[settings.source] ? settings.source : 'adsb.fi';
+    const primary = SERVICES[settings.source] ? settings.source : (settings.internetService || 'adsb.fi');
     const candidates = [primary];
     if (settings.fallback !== false) {
       candidates.push(...Object.keys(SERVICES).filter((n) => n !== primary));
@@ -279,14 +286,35 @@ module.exports = (app) => {
     return !settings.source || settings.source === 'dump1090' || settings.source === 'readsb';
   }
 
-  function poll(settings) {
+  // With a local receiver plus the internet, both pollers report together.
+  // An internet failure then only shows in the status: the receiver still works.
+  function report(kind, settings, message, isError) {
+    const combined = isLocal(settings) && settings.internetSupplement === true;
+    if (!combined) {
+      if (isError) {
+        app.setPluginError(message);
+      } else {
+        app.setPluginStatus(message);
+      }
+      return;
+    }
+    if (isError && kind === 'local') {
+      app.setPluginError(message);
+      return;
+    }
+    statusParts[kind] = message;
+    app.setPluginStatus([statusParts.local, statusParts.internet].filter(Boolean).join(' · '));
+  }
+
+  // kind: 'local' or 'internet'; by default whatever `source` selects
+  function poll(settings, kind = isLocal(settings) ? 'local' : 'internet') {
     let request;
-    if (settings.source === 'readsb') {
-      request = fetchReadsbLocal(settings);
-    } else if (isLocal(settings)) {
-      request = fetchDump1090(settings);
-    } else {
+    if (kind === 'internet') {
       request = fetchInternet(settings);
+    } else if (settings.source === 'readsb') {
+      request = fetchReadsbLocal(settings);
+    } else {
+      request = fetchDump1090(settings);
     }
     return request
       .then((result) => {
@@ -294,19 +322,27 @@ module.exports = (app) => {
           return;
         }
         if (result.status) {
-          app.setPluginStatus(result.status);
+          report(kind, settings, result.status, false);
           return;
         }
         if (result.error) {
-          app.setPluginError(result.error);
+          report(kind, settings, result.error, true);
           return;
         }
         app.debug(result);
+        const now = Date.now();
         // Aircraft without a position fix can't be shown on a chart
-        const aircraft = result.aircraft
+        let aircraft = result.aircraft
           .filter((a) => a.hex && a.lat !== undefined && a.lon !== undefined);
+        if (kind === 'local') {
+          aircraft.forEach((a) => heardLocally.set(a.hex, now));
+        } else if (isLocal(settings)) {
+          // Supplementing a local receiver: keep its fresher positions
+          aircraft = aircraft
+            .filter((a) => now - (heardLocally.get(a.hex) || 0) >= LOCAL_PRIORITY);
+        }
         if (!aircraft.length) {
-          app.setPluginStatus(`Not receiving aircraft ${result.via}`);
+          report(kind, settings, `Not receiving aircraft ${result.via}`, false);
           return;
         }
         aircraft.forEach((a) => {
@@ -324,25 +360,29 @@ module.exports = (app) => {
             ],
           });
         });
-        app.setPluginStatus(`Receiving ${aircraft.length} aircraft ${result.via}`);
+        report(kind, settings, `Receiving ${aircraft.length} aircraft ${result.via}`, false);
       })
       .catch((err) => {
         app.debug(err);
-        app.setPluginError(err.message);
+        report(kind, settings, err.message, true);
       });
   }
 
   plugin.start = (settings) => {
     state = {};
-    const seconds = isLocal(settings) ? settings.interval || 10 : settings.internetInterval || 30;
-    interval = setInterval(() => poll(settings), seconds * 1000);
+    heardLocally = new Map();
+    statusParts = {};
+    if (isLocal(settings)) {
+      intervals.push(setInterval(() => poll(settings, 'local'), (settings.interval || 10) * 1000));
+    }
+    if (!isLocal(settings) || settings.internetSupplement === true) {
+      intervals.push(setInterval(() => poll(settings, 'internet'), (settings.internetInterval || 30) * 1000));
+    }
   };
 
   plugin.stop = () => {
-    if (interval) {
-      clearInterval(interval);
-      interval = undefined;
-    }
+    intervals.forEach((i) => clearInterval(i));
+    intervals = [];
   };
 
   // Exposed for tests
@@ -401,6 +441,19 @@ module.exports = (app) => {
         minimum: 5,
         title: 'Internet: refresh interval (in seconds)',
         description: 'How often to fetch the aircraft from the internet. adsb.lol allows 500 requests a day, so it is never asked more often than every 173 seconds.',
+      },
+      internetSupplement: {
+        type: 'boolean',
+        default: false,
+        title: 'Local receiver: also fetch aircraft from the internet',
+        description: 'Adds the aircraft beyond the receiver\'s range from the internet service below. Aircraft the receiver hears keep its fresher positions.',
+      },
+      internetService: {
+        type: 'string',
+        enum: ['adsb.fi', 'adsb.lol'],
+        default: 'adsb.fi',
+        title: 'Local receiver: internet service to add',
+        description: 'Used with "also fetch aircraft from the internet"',
       },
       fallback: {
         type: 'boolean',
